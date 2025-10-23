@@ -66,6 +66,14 @@ class SendEmailRequest(BaseModel):
         }
 
 
+class AttachmentInfo(BaseModel):
+    """Model cho thông tin file đính kèm"""
+    name: str
+    contentType: str
+    size: int
+    contentBytes: str  # Base64 encoded
+
+
 class ParsedDocumentInfo(BaseModel):
     """Model cho thông tin document đã parse"""
     subject: str
@@ -81,6 +89,7 @@ class ParsedDocumentInfo(BaseModel):
     returnEmail: str
     messageId: str
     receivedDateTime: str
+    attachments: List[AttachmentInfo] = []  # Danh sách file đính kèm
 
 
 class IncomingDocumentsResponse(BaseModel):
@@ -277,7 +286,7 @@ async def send_document_outgoing(
 @app.get("/receiveDocumentIncoming",
          response_model=IncomingDocumentsResponse,
          summary="Nhận email công văn đến",
-         description="API để kiểm tra và lấy danh sách email chưa đọc có format hợp lệ")
+         description="API để kiểm tra và lấy danh sách email chưa đọc có format hợp lệ kèm attachments")
 async def receive_document_incoming(api_key: str = Security(verify_api_key)):
     """
     Nhận email công văn đến
@@ -285,10 +294,14 @@ async def receive_document_incoming(api_key: str = Security(verify_api_key)):
     Lấy danh sách email chưa đọc từ hộp thư, parse body theo format template
     và trả về chỉ những email có format hợp lệ
     
+    **Bao gồm cả file attachments (nếu có):**
+    - Mỗi attachment có: name, contentType, size, contentBytes (base64)
+    - contentBytes là base64 encoded string, FE có thể decode và upload lên storage
+    
     Sau khi parse thành công, email sẽ được đánh dấu là đã đọc
     
     Returns:
-        Danh sách document đã parse với thông tin đầy đủ
+        Danh sách document đã parse với thông tin đầy đủ và attachments
     """
     try:
         # Lấy danh sách email chưa đọc
@@ -316,6 +329,27 @@ async def receive_document_incoming(api_key: str = Security(verify_api_key)):
                 if message.get('from') and message['from'].get('emailAddress'):
                     from_email = message['from']['emailAddress'].get('address', '')
                 
+                # Lấy attachments của email
+                attachments = []
+                try:
+                    if message_id:
+                        print(f"📎 Đang lấy attachments cho email {message_id[:30]}...")
+                        message_attachments = graph_service.get_message_attachments(USER_EMAIL, message_id)
+                        
+                        for att in message_attachments:
+                            attachments.append(AttachmentInfo(
+                                name=att.get('name', 'unknown'),
+                                contentType=att.get('contentType', 'application/octet-stream'),
+                                size=att.get('size', 0),
+                                contentBytes=att.get('contentBytes', '')
+                            ))
+                        
+                        if attachments:
+                            print(f"✅ Tìm thấy {len(attachments)} attachment(s): {[att.name for att in attachments]}")
+                except Exception as att_error:
+                    print(f"⚠️ Lỗi khi lấy attachments cho email {message_id[:30]}...: {att_error}")
+                    # Tiếp tục xử lý email dù không lấy được attachments
+                
                 # Tạo document info
                 document = ParsedDocumentInfo(
                     subject=message.get('subject', ''),
@@ -330,7 +364,8 @@ async def receive_document_incoming(api_key: str = Security(verify_api_key)):
                     docId=parsed_info.get('docId', ''),
                     returnEmail=parsed_info.get('returnEmail', ''),
                     messageId=message_id,
-                    receivedDateTime=message.get('receivedDateTime', '')
+                    receivedDateTime=message.get('receivedDateTime', ''),
+                    attachments=attachments
                 )
                 
                 parsed_documents.append(document)

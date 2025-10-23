@@ -171,4 +171,44 @@ class GraphService:
             # Log lỗi để debug
             print(f"⚠️ Mark as read failed: Status {response.status_code}, Response: {response.text[:200]}")
             return False
+    
+    def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict]:
+        """
+        Lấy danh sách attachments của một email
+        
+        Args:
+            user_email: Email người dùng
+            message_id: ID của message
+        
+        Returns:
+            List các attachment với thông tin: name, contentType, size, contentBytes (base64)
+        """
+        token = self.get_access_token()
+        
+        endpoint = f"{GRAPH_API_ENDPOINT}/users/{user_email}/messages/{message_id}/attachments"
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(endpoint, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            attachments = []
+            
+            for attachment in data.get('value', []):
+                # Chỉ lấy file attachments (không lấy inline images)
+                if attachment.get('@odata.type') == '#microsoft.graph.fileAttachment':
+                    attachments.append({
+                        'name': attachment.get('name', 'unknown'),
+                        'contentType': attachment.get('contentType', 'application/octet-stream'),
+                        'size': attachment.get('size', 0),
+                        'contentBytes': attachment.get('contentBytes', '')  # Đã là base64
+                    })
+            
+            return attachments
+        else:
+            print(f"⚠️ Get attachments failed: Status {response.status_code}, Response: {response.text[:200]}")
+            return []
 
