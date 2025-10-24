@@ -4,6 +4,7 @@ Service layer để tương tác với Microsoft Graph API
 import msal
 import requests
 import base64
+import time
 from typing import Dict, List, Optional
 from config import CLIENT_ID, TENANT_ID, CLIENT_SECRET, GRAPH_API_ENDPOINT, AUTHORITY, SCOPE
 
@@ -18,25 +19,43 @@ class GraphService:
         self.authority = AUTHORITY
         self.scope = SCOPE
         self.access_token = None
+        self.token_expiry = 0  # Timestamp khi token hết hạn (5 phút)
     
     def get_access_token(self) -> str:
-        """Lấy access token từ Azure AD"""
+        """
+        Lấy access token với caching 5 phút
+        - Lần đầu: Request token mới
+        - Sau đó: Reuse token trong 5 phút
+        - Sau 5 phút: Request token mới
+        """
+        current_time = time.time()
+        
+        # Kiểm tra xem token còn valid không (trong vòng 5 phút)
+        if self.access_token and current_time < self.token_expiry:
+            remaining_seconds = int(self.token_expiry - current_time)
+            print(f"🔄 Reuse token (còn {remaining_seconds}s)")
+            return self.access_token
+        
+        # Token hết hạn hoặc chưa có token → lấy mới
+        print("🔑 Lấy access token mới...")
+        
         app = msal.ConfidentialClientApplication(
             self.client_id,
             authority=self.authority,
             client_credential=self.client_secret
         )
         
-        result = app.acquire_token_silent(self.scope, account=None)
-        
-        if not result:
-            result = app.acquire_token_for_client(scopes=self.scope)
+        result = app.acquire_token_for_client(scopes=self.scope)
         
         if "access_token" in result:
             self.access_token = result["access_token"]
+            # Set expire sau 5 phút (300 giây)
+            self.token_expiry = current_time + 300
+            print(f"✅ Token mới - valid trong 5 phút")
             return self.access_token
         else:
-            raise Exception(f"Không thể lấy access token: {result.get('error_description')}")
+            error_msg = result.get('error_description', 'Unknown error')
+            raise Exception(f"Không thể lấy access token: {error_msg}")
     
     def send_email(self, user_email: str, to_recipients: List[str], subject: str, 
                    body: str, cc_recipients: Optional[List[str]] = None,
@@ -172,6 +191,36 @@ class GraphService:
             print(f"⚠️ Mark as read failed: Status {response.status_code}, Response: {response.text[:200]}")
             return False
     
+    def _make_request_with_retry(self, method: str, endpoint: str, headers: Dict, 
+                                  max_retries: int = 3, **kwargs) -> requests.Response:
+        """
+        HTTP request với retry cho rate limit/errors
+        
+        Retry với exponential backoff: 1s → 2s → 4s
+        """
+        for attempt in range(max_retries):
+            try:
+                response = requests.request(method, endpoint, headers=headers, **kwargs)
+                
+                # Nếu gặp 429 (rate limit) hoặc 503 (service unavailable), retry
+                if response.status_code in [429, 503] and attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # 1s, 2s, 4s
+                    print(f"⚠️ Error {response.status_code}, retry sau {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                
+                return response
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"⚠️ Request error: {e}, retry sau {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                raise
+        
+        return response
+    
     def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict]:
         """
         Lấy danh sách attachments của một email
@@ -191,7 +240,7 @@ class GraphService:
             'Content-Type': 'application/json'
         }
         
-        response = requests.get(endpoint, headers=headers)
+        response = self._make_request_with_retry('GET', endpoint, headers)
         
         if response.status_code == 200:
             data = response.json()
